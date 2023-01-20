@@ -4,6 +4,8 @@ import cors from "cors";
 import Joi from "joi";
 import { MongoClient, ObjectId } from "mongodb";
 import { v4 as uuidv4 } from 'uuid';
+import bcrypt from 'bcrypt';
+import dayjs from "dayjs";
 dotenv.config();
 
 
@@ -24,23 +26,29 @@ try {
 
 //Cadastro
 app.post('/users', async (req, res) => {
-    const { name, email, password } = req.body;
+    const { name, email, password, confirmPassword } = req.body;
 
     const schema = Joi.object({
         name: Joi.string().required(),
         email: Joi.string().email().required(),
-        password: Joi.string().required()
+        password: Joi.string().required(),
+        confirmPassword: Joi.string().required()
     })
 
-    if (schema.validate({ name, email, password }).error) {
+    if (schema.validate({ name, email, password, confirmPassword }).error) {
         return res.status(422).send("Preencha os campos corretamente!");
     }
+
+    if (password !== confirmPassword) return res.status(400).send("Senhas estão diferentes");
+
+    const encryptedPassword = bcrypt.hashSync(password, 10);
 
     try {
         const userExist = await db.collection("users").findOne({ email });
         if (userExist) return res.status(409).send("Email já cadastrado");
+        
         await db.collection("users").insertOne({
-            name, email, password
+            name, email, password: encryptedPassword
         });
         res.sendStatus(201);
     } catch (error) {
@@ -61,33 +69,81 @@ app.post('/logged', async (req, res) => {
         return res.status(422).send("Preencha os campos corretamente!");
     }
 
-    const token = uuidv4();
-
     try {
         const userExist = await db.collection("users").findOne({ email });
-        if (!userExist) {
-            return res.status(404).send('Email não cadastrado');
-        } else {
-            if (userExist.password !== password){
-                return res.status(401).send('Senha incorreta');
-            }
+        if (!userExist || !bcrypt.compareSync(password, userExist.password)) {
+            return res.status(404).send('Email ou senha incorretos');
         }
 
+        const token = uuidv4();
+
         await db.collection("logged").insertOne({
-            email, password, token
+            userId: ObjectId(userExist._id), token
         });
         const name = userExist.name;
         
-        res.status(201).send({name, email, password, token});
+        res.status(201).send({name, token});
     } catch (error) {
         res.status(500).send(error.message);
     }
 });
 
 //Home
-app.get('/account', async (req, res) => {
-    const { token } = req.headers;
+app.get('/transactions', async (req, res) => {
+    const { authorization } = req.headers;
+    const token = authorization?.replace('Bearer ', '');
 
+    if (!token) return res.status(401).send("Você não tem autorização");
+
+    try {
+    const userLogged = await db.collection("logged").findOne({ token });
+    
+    if (!userLogged) return res.status(401).send("Você não tem autorização");
+
+    //const user = await db.collection("users").findOne({_id: userLogged.userId});
+    
+    const transactions = await db.collection("transactions").find({userId: userLogged.userId}).toArray();
+
+    res.send(transactions);
+
+    } catch (error) {
+        res.status(500).send(error.message);
+    } 
+});
+
+app.post('/transactions', async (req, res) => {
+    const { authorization } = req.headers;
+    const token = authorization?.replace('Bearer ', '');
+    const { amount, description, type } = req.body;
+
+    const schema = Joi.object({
+        amount: Joi.number().required(),
+        description: Joi.string().required(),
+        type: Joi.string().valid('income', 'expense').required()
+    })
+
+    if (schema.validate({ amount, description, type }).error) {
+        return res.status(422).send(schema.validate({ amount, description }).error.message);
+    }
+
+    try {
+        const userLogged = await db.collection("logged").findOne({ token });
+
+        if (!userLogged) return res.status(401).send("Você não tem autorização");
+
+        const { userId } = userLogged;
+
+        await db.collection("transactions").insertOne({
+            amount: Number(amount).toFixed(2).replace('.', ','),
+            description,
+            type,
+            userId,
+            date: dayjs().format('DD/MM')
+        });
+        res.sendStatus(201);
+    } catch (error) {
+        res.status(500).send(error.message);
+    }
 
 });
 
