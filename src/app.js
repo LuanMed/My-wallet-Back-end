@@ -75,12 +75,18 @@ app.post('/logged', async (req, res) => {
             return res.status(404).send('Email ou senha incorretos');
         }
 
+        const name = userExist.name;
         const token = uuidv4();
+        
+        const loggedAlready = await db.collection("logged").findOne({ userId: userExist._id });
+        if (loggedAlready) {
+            await db.collection("logged").updateOne({userId: userExist._id}, {$set: {token: token}});
+            return res.status(200).send({name, token});
+        }
 
         await db.collection("logged").insertOne({
             userId: ObjectId(userExist._id), token
         });
-        const name = userExist.name;
         
         res.status(201).send({name, token});
     } catch (error) {
@@ -104,7 +110,19 @@ app.get('/transactions', async (req, res) => {
     
     const transactions = await db.collection("transactions").find({userId: userLogged.userId}).toArray();
 
-    res.send(transactions);
+    const values = await db.collection("transactions").find({userId: userLogged.userId});
+    let finalBalance = 0;
+    transactions.map(t => {
+        if (t.type === "income") {
+            const value = t.amount.replace(',','.')
+            finalBalance += Number(value)
+        } else {
+            const value = t.amount.replace(',','.')
+            finalBalance -= Number(value)
+        }
+    })
+
+    res.send({ transactions, finalBalance: finalBalance.toFixed(2).replace('.', ',')});
 
     } catch (error) {
         res.status(500).send(error.message);
@@ -146,6 +164,50 @@ app.post('/transactions', async (req, res) => {
     }
 
 });
+
+app.delete('/transactions/:id', async (req, res) => {
+    const { id } = req.params;
+    const { authorization } = req.headers;
+    const token = authorization?.replace('Bearer ', '');
+    
+
+    if (!token) return res.status(401).send("Você não tem autorização");
+
+    try {
+        const userLogged = await db.collection("logged").findOne({ token });
+        if (!userLogged) return res.status(401).send("Você não tem autorização");
+
+        const entry = await db.collection("transactions").findOne({ _id: ObjectId(id), userId: userLogged.userId });
+        if (!entry) return res.status(404).send("Mensagem não encontrada");
+
+        await db.collection("transactions").deleteOne( {_id: ObjectId(id)});
+        res.sendStatus(202);
+    } catch (error) {
+        res.status(500).send(error.message);
+    }
+})
+
+app.get('/balance', async (req, res) => {
+    const { authorization } = req.headers;
+    const token = authorization?.replace('Bearer ', '');
+
+    if (!token) return res.status(401).send("Você não tem autorização");
+
+    try {
+        const userLogged = await db.collection("logged").findOne({ token });
+        
+        if (!userLogged) return res.status(401).send("Você não tem autorização");
+    
+        //const user = await db.collection("users").findOne({_id: userLogged.userId});
+        
+        const transactions = await db.collection("transactions").find({userId: userLogged.userId}).toArray();
+    
+        res.send(transactions);
+    
+        } catch (error) {
+            res.status(500).send(error.message);
+        } 
+})
 
 const PORT = 5000;
 
